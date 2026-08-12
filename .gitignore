@@ -1,0 +1,13 @@
+# Python bytecode -- regenerated on every run, never worth a diff.
+__pycache__/
+*.py[cod]
+
+# Scratch files left behind by the CSV migration / round-trip checks.
+*.mig
+*.csv.t
+
+# NOTE: data/*.csv, profile.py and assets/ ARE tracked on purpose -- this repo
+# is private and holds the actual job-search state, not just the tooling. If it
+# is ever made public, those need removing from the *history*, not just the
+# working tree (git filter-repo / a fresh init), since they carry contact
+# details, visa answers and the record of what was applied to.
