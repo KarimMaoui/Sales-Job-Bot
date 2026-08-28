@@ -3,16 +3,23 @@ Target company list for the sales job search tool.
 
 Each entry:
   name       - display name
-  ats        - "greenhouse" or "ashby" (which public job-board API to query)
-  slug       - the company's slug on that ATS
+  ats        - which public job-board API to query. One of "greenhouse",
+               "ashby", "workday", "oracle", "amazon", "google",
+               "smartrecruiters", "yc" (see FETCHERS in fetch_jobs.py).
+  slug       - the company's identifier on that ATS. Unused by "google",
+               whose feed covers one company only.
   sponsors_h1b - True/False/None (None = unknown, verify manually on myvisajobs.com
                  or h1bgrader.com before relying on it). This is a best-effort signal
                  based on public reputation, NOT a guarantee. Always confirm on the
                  actual job posting (look for "visa sponsorship available" language)
                  or ask the recruiter directly.
+  host, site - required by "workday" (the tenant's own subdomain and career-site
+               name, both visible in the careers URL) and "oracle" (the HCM host
+               and its numeric site id).
 
-Verified reachable via API test on 2026-08-09. Re-run fetch_jobs.py --check-slugs
-periodically since companies migrate ATS providers.
+Greenhouse/Ashby slugs verified reachable via API test on 2026-08-09; the
+big-tech entries on 2026-08-28. Re-run fetch_jobs.py --check-slugs periodically
+since companies migrate ATS providers.
 """
 
 import re
@@ -121,7 +128,46 @@ COMPANIES = [
     {"name": "Resend", "ats": "ashby", "slug": "resend", "sponsors_h1b": None},
     {"name": "Fathom", "ats": "ashby", "slug": "fathom", "sponsors_h1b": None},
     {"name": "Attio", "ats": "ashby", "slug": "attio", "sponsors_h1b": None},
+    # NB: Y Combinator is deliberately NOT in this list -- see YC_SOURCE below.
+
+    # --- Big-tech career sites, added 2026-08-28 ---
+    # These run their own ATS rather than Greenhouse/Ashby, so each needs its
+    # own fetcher. sponsors_h1b is True across the board: all of them file
+    # H-1B petitions in the thousands annually and appear on the public
+    # top-sponsor lists, which is a far stronger signal than the reputational
+    # guess behind the startup entries above. Still confirm on the posting.
+    #
+    # Snowflake (Ashby), Databricks and Datadog (Greenhouse) are deliberately
+    # NOT repeated here -- they already appear above on their real ATS.
+    {"name": "AWS", "ats": "amazon", "slug": "aws", "sponsors_h1b": True},
+    {"name": "Google", "ats": "google", "slug": "google", "sponsors_h1b": True},
+    {"name": "Oracle", "ats": "oracle", "slug": "CX_45001",
+     "host": "eeho.fa.us2.oraclecloud.com", "sponsors_h1b": True},
+    {"name": "ServiceNow", "ats": "smartrecruiters", "slug": "ServiceNow",
+     "sponsors_h1b": True},
+
+    # Workday-hosted career sites. `slug` is the Workday tenant, `host` its
+    # subdomain (the wdN number differs per tenant), `site` the career-site id.
+    {"name": "Nvidia", "ats": "workday", "slug": "nvidia",
+     "host": "nvidia.wd5", "site": "NVIDIAExternalCareerSite", "sponsors_h1b": True},
+    {"name": "Salesforce", "ats": "workday", "slug": "salesforce",
+     "host": "salesforce.wd12", "site": "External_Career_Site", "sponsors_h1b": True},
+    {"name": "Workday", "ats": "workday", "slug": "workday",
+     "host": "workday.wd5", "site": "Workday", "sponsors_h1b": True},
+    {"name": "Adobe", "ats": "workday", "slug": "adobe",
+     "host": "adobe.wd5", "site": "external_experienced", "sponsors_h1b": True},
+    {"name": "HPE", "ats": "workday", "slug": "hpe",
+     "host": "hpe.wd5", "site": "Jobsathpe", "sponsors_h1b": True},
 ]
+
+# One source covering hundreds of YC startups rather than a single company, so it
+# is kept out of COMPANIES: it feeds its own market (--yc) with its own filters
+# -- three weeks instead of 30 days, 0-3 years, and sales *plus* marketing and
+# operations -- and the US/EU/French sales runs must not pick it up. Each posting
+# carries its own company name and its own sponsorship claim, so the fields here
+# are only what the fetcher registry needs.
+YC_SOURCE = {"name": "Y Combinator", "ats": "yc", "slug": "yc",
+             "sponsors_h1b": True}
 
 SALES_TITLE_KEYWORDS = [
     "sales development",

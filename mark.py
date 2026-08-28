@@ -31,6 +31,8 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CSV_PATHS = {
     "us": os.path.join(DATA_DIR, "jobs.csv"),
     "french": os.path.join(DATA_DIR, "jobs_french.csv"),
+    "eu": os.path.join(DATA_DIR, "jobs_eu.csv"),
+    "yc": os.path.join(DATA_DIR, "jobs_yc.csv"),
 }
 
 # Ordered roughly by pipeline progression. PENDING statuses still need action
@@ -41,7 +43,7 @@ DONE_STATUSES = ["applied", "interviewing", "offer", "rejected", "skipped"]
 STATUSES = PENDING_STATUSES + DONE_STATUSES
 
 FIELDS = ["company", "title", "location", "url", "sponsors_h1b",
-          "years_experience", "updated_at", "date_kind", "status",
+          "years_experience", "posted_at", "updated_at", "date_kind", "status",
           "first_seen", "status_updated", "note"]
 
 
@@ -50,11 +52,13 @@ def load(csv_path):
         sys.exit(f"No tracked jobs at {csv_path} -- run tracker.py first.")
     with open(csv_path, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    # status_updated/note/date_kind postdate the original tracker schema. Filled
-    # in on load so save() can't blank out a column this script never touches.
+    # status_updated/note/date_kind/posted_at postdate the original tracker
+    # schema. Filled in on load so save() can't blank out a column this script
+    # never touches.
     for row in rows:
         row.setdefault("status_updated", "")
         row.setdefault("note", "")
+        row.setdefault("posted_at", "")
         if not row.get("date_kind"):
             row["date_kind"] = date_kind_for(row["company"], row["url"])
     return rows
@@ -90,9 +94,15 @@ def main():
                         help="allow updating every row matching --match, not just a unique one")
     parser.add_argument("--french", action="store_true",
                         help="operate on data/jobs_french.csv instead")
+    parser.add_argument("--eu", action="store_true",
+                        help="operate on data/jobs_eu.csv instead")
+    parser.add_argument("--yc", action="store_true",
+                        help="operate on data/jobs_yc.csv instead")
     args = parser.parse_args()
 
-    csv_path = CSV_PATHS["french" if args.french else "us"]
+    csv_path = CSV_PATHS["yc" if args.yc else
+                         "eu" if args.eu else
+                         "french" if args.french else "us"]
     rows = load(csv_path)
 
     if args.list:

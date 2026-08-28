@@ -8,13 +8,21 @@ Usage:
 
 Two filters, then a ranking:
 
-1. Freshness -- drops anything whose `updated_at` is older than
-   --max-age-days (default 90). A posting the company hasn't touched in
-   months is usually filled or abandoned, and applying to it wastes a slot.
-   Applies only to rows with `date_kind == "updated"` (Greenhouse). Ashby's
-   public API returns no last-modified field, so those rows carry a
-   publication date instead and get exempted -- ageing them out would throw
-   away live evergreen reqs. Pass --strict-age to filter both alike.
+1. Freshness -- drops anything published more than --max-age-days ago
+   (default 30, matching fetch_jobs.py), *unless* it was last modified within
+   --refresh-days (default 15). Rows carrying a `posted_at` are judged on that
+   date: it is a real publication date from the source, so "over 30 days old" is
+   a fact about the posting rather than an inference. The refresh exception
+   exists for evergreen reqs, where publication date and "is anyone still
+   hiring for this" have drifted apart -- it only applies where `date_kind` is
+   `updated` (Greenhouse), the one source reporting a true last-modified date.
+
+   Rows predating the `posted_at` column fall back to the old rule, which reads
+   `updated_at` and is only trustworthy where `date_kind == "updated"`
+   (Greenhouse). Ashby and the big-tech career sites return no last-modified
+   field, so those legacy rows carry a publication date in `updated_at` and get
+   exempted -- ageing them out would throw away live evergreen reqs. Pass
+   --strict-age to filter both alike.
 2. Seniority -- drops anything with a *known* requirement above
    --max-years (default 2). Postings with a blank `years_experience` are
    KEPT but ranked lower, because blank means "the regex found nothing",
@@ -41,7 +49,9 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from companies import unsupported_language_in
-from fetch_jobs import date_kind_for, location_is_us
+from fetch_jobs import (DEFAULT_MAX_AGE_DAYS, DEFAULT_REFRESH_DAYS,
+                        YC_MAX_AGE_DAYS, YC_MAX_EXPERIENCE,
+                        date_kind_for, location_is_us, refreshed_since)
 from mark import DONE_STATUSES
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
@@ -49,15 +59,17 @@ SOURCE_PATHS = {
     "us": os.path.join(DATA_DIR, "jobs.csv"),
     "french": os.path.join(DATA_DIR, "jobs_french.csv"),
     "eu": os.path.join(DATA_DIR, "jobs_eu.csv"),
+    "yc": os.path.join(DATA_DIR, "jobs_yc.csv"),
 }
 OUTPUT_PATHS = {
     "us": os.path.join(DATA_DIR, "shortlist.csv"),
     "french": os.path.join(DATA_DIR, "shortlist_french.csv"),
     "eu": os.path.join(DATA_DIR, "shortlist_eu.csv"),
+    "yc": os.path.join(DATA_DIR, "shortlist_yc.csv"),
 }
 FIELDS = ["tier", "company", "title", "location", "sponsors_h1b",
-          "years_experience", "updated_at", "date_kind", "status", "note",
-          "url"]
+          "years_experience", "posted_at", "updated_at", "date_kind", "status",
+          "note", "url"]
 
 
 def parse_updated_at(value: str):
@@ -158,20 +170,36 @@ def tier_for(sponsors: str, years, max_years: int,
     return "C" if years_ok else "D"
 
 
-def build(today: str, market: str = "us", max_age_days: int = 90,
+def sort_date(row):
+    """The date to rank freshness on: the real publication date where the row
+    has one, else whatever `updated_at` holds. Never None, so a row with two
+    unreadable dates sorts last instead of crashing the sort."""
+    return (parse_updated_at(row.get("posted_at"))
+            or parse_updated_at(row.get("updated_at"))
+            or datetime.min.replace(tzinfo=timezone.utc))
+
+
+def build(today: str, market: str = "us",
+          max_age_days: int = DEFAULT_MAX_AGE_DAYS,
           max_years: int = 2, include_done: bool = False,
-          keep_per_role: int = None, strict_age: bool = False):
+          keep_per_role: int = None, strict_age: bool = False,
+          refresh_days: int = DEFAULT_REFRESH_DAYS):
     source = SOURCE_PATHS[market]
     with open(source, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     for row in rows:
         row.setdefault("status_updated", "")
         row.setdefault("note", "")
+        row.setdefault("posted_at", "")
         if not row.get("date_kind"):
             row["date_kind"] = date_kind_for(row["company"], row["url"])
 
-    cutoff = datetime.fromisoformat(today).replace(tzinfo=timezone.utc) \
-        - timedelta(days=max_age_days)
+    reference = datetime.fromisoformat(today).replace(tzinfo=timezone.utc)
+    cutoff = reference - timedelta(days=max_age_days)
+    # --strict-age means "age every row out on its own date", so it switches off
+    # the evergreen readmission as well as the legacy exemption below.
+    refresh_cutoff = (None if strict_age or refresh_days <= 0
+                      else reference - timedelta(days=refresh_days))
 
     kept = []
     dropped_stale = dropped_senior = dropped_unparsed = dropped_non_us = 0
@@ -188,18 +216,29 @@ def build(today: str, market: str = "us", max_age_days: int = 90,
         if market == "us" and not location_is_us(row["location"]):
             dropped_non_us += 1
             continue
-        updated = parse_updated_at(row["updated_at"])
-        if updated is None:
-            dropped_unparsed += 1
-            continue
-        if updated < cutoff:
-            # A "published" date can't answer the question this filter asks.
-            # Ashby exposes no last-modified field, so an old date there means
-            # the req went up a while ago, not that it went cold -- and the API
-            # only returns postings still listed on the board. Dropping those
-            # discards live openings, so exempt them and let the ranking below
-            # push them down instead.
-            if strict_age or row["date_kind"] != "published":
+        posted = parse_updated_at(row["posted_at"])
+        if posted is not None:
+            # A real publication date from the source: "published over N days
+            # ago" is simply true or false, with none of the ambiguity below.
+            # A recent edit still readmits an old req -- the evergreen case,
+            # where publication date and "is this live" have drifted apart.
+            if posted < cutoff and not refreshed_since(
+                    row["date_kind"], row["updated_at"], refresh_cutoff):
+                dropped_stale += 1
+                continue
+        else:
+            # Legacy row, written before posted_at existed. All we have is
+            # updated_at, and a "published" date there can't answer the question
+            # this filter asks: Ashby and the big-tech sites expose no
+            # last-modified field, so an old date means the req went up a while
+            # ago, not that it went cold -- and those APIs only return postings
+            # still listed on the board. Dropping them discards live openings,
+            # so exempt them and let the ranking below push them down instead.
+            updated = parse_updated_at(row["updated_at"])
+            if updated is None:
+                dropped_unparsed += 1
+                continue
+            if updated < cutoff and (strict_age or row["date_kind"] != "published"):
                 dropped_stale += 1
                 continue
         years = parse_years(row["years_experience"])
@@ -214,6 +253,7 @@ def build(today: str, market: str = "us", max_age_days: int = 90,
             "location": row["location"],
             "sponsors_h1b": row["sponsors_h1b"],
             "years_experience": row["years_experience"],
+            "posted_at": row["posted_at"],
             "updated_at": row["updated_at"],
             "date_kind": row["date_kind"],
             "status": row["status"],
@@ -221,10 +261,9 @@ def build(today: str, market: str = "us", max_age_days: int = 90,
             "url": row["url"],
         })
 
-    # Within a tier, freshest first -- a posting touched yesterday is more
-    # likely to still be taking applications than one touched 80 days ago.
-    kept.sort(key=lambda r: (r["tier"],
-                             -parse_updated_at(r["updated_at"]).timestamp()))
+    # Within a tier, freshest first -- a posting put up yesterday is more
+    # likely to still be taking applications than one from 40 days ago.
+    kept.sort(key=lambda r: (r["tier"], -sort_date(r).timestamp()))
 
     # Dedupe after sorting so each group's survivors are its best-ranked,
     # freshest postings rather than whichever happened to come first in the CSV.
@@ -248,10 +287,21 @@ def build(today: str, market: str = "us", max_age_days: int = 90,
         "duplicate": dropped_duplicate,
         "language": dropped_language,
         # Recounted against the final list so the number matches what's in the
-        # CSV -- an exempted row can still lose its slot to the deduper.
+        # CSV -- an exempted row can still lose its slot to the deduper. Only
+        # legacy rows (no posted_at) can be exempt; anything with a real
+        # publication date was aged out on it above.
         "age_exempt": sum(1 for r in kept
-                          if r["date_kind"] == "published"
-                          and parse_updated_at(r["updated_at"]) < cutoff),
+                          if not r["posted_at"]
+                          and r["date_kind"] == "published"
+                          and (parse_updated_at(r["updated_at"]) or cutoff) < cutoff),
+        # Same reason for recounting: rows readmitted by a recent edit despite an
+        # old publication date -- the evergreen reqs. Worth showing separately
+        # from age_exempt, which is about rows with no publication date at all.
+        "refreshed": sum(1 for r in kept
+                         if r["posted_at"]
+                         and (parse_updated_at(r["posted_at"]) or reference) < cutoff
+                         and refreshed_since(r["date_kind"], r["updated_at"],
+                                             refresh_cutoff)),
     }
 
 
@@ -263,13 +313,29 @@ def main():
                         help="shortlist data/jobs_french.csv instead of the US list")
     parser.add_argument("--eu", action="store_true",
                         help="shortlist data/jobs_eu.csv instead of the US list")
-    parser.add_argument("--max-age-days", type=int, default=90)
+    parser.add_argument("--max-age-days", type=int, default=None,
+                        help=f"drop roles published more than this many days ago "
+                             f"(default {DEFAULT_MAX_AGE_DAYS}, or "
+                             f"{YC_MAX_AGE_DAYS} with --yc, same as fetch_jobs.py)")
+    parser.add_argument("--refresh-days", type=int, default=DEFAULT_REFRESH_DAYS,
+                        help=f"keep a role published before the cutoff if it was "
+                             f"last modified within this many days (default "
+                             f"{DEFAULT_REFRESH_DAYS}, same as fetch_jobs.py). "
+                             f"Pass 0 to age out evergreen reqs on publication "
+                             f"date alone.")
     parser.add_argument("--strict-age", action="store_true",
-                        help="also age out postings whose date is a publication "
-                             "date rather than a last-modified one (Ashby boards, "
-                             "which expose no update field). Off by default "
-                             "because it drops still-listed evergreen reqs.")
-    parser.add_argument("--max-years", type=int, default=2)
+                        help="age every row out on its own date: drops both the "
+                             "recently-edited evergreen reqs and the legacy rows "
+                             "whose only date is a publication date standing in "
+                             "for a last-modified one. Off by default because it "
+                             "drops still-listed openings.")
+    parser.add_argument("--yc", action="store_true",
+                        help="shortlist data/jobs_yc.csv (YC startups' "
+                             "sales/marketing/operations roles) instead")
+    parser.add_argument("--max-years", type=int, default=None,
+                        help=f"drop roles with a known requirement above this "
+                             f"many years (default 2, or {YC_MAX_EXPERIENCE} "
+                             f"with --yc, matching the YC board's own band)")
     parser.add_argument("--limit", type=int, default=None,
                         help="only print the first N rows (the CSV always gets all of them)")
     parser.add_argument("--include-done", action="store_true",
@@ -281,11 +347,21 @@ def main():
                              "keeping the freshest N per role (default 2)")
     args = parser.parse_args()
 
-    market = "french" if args.french else ("eu" if args.eu else "us")
+    market = ("yc" if args.yc else
+              "french" if args.french else ("eu" if args.eu else "us"))
+    # The YC list runs on the board's own bands rather than the sales defaults:
+    # three weeks instead of 30 days, and 0-3 years instead of 0-2.
+    if args.max_age_days is None:
+        args.max_age_days = (YC_MAX_AGE_DAYS if market == "yc"
+                             else DEFAULT_MAX_AGE_DAYS)
+    if args.max_years is None:
+        args.max_years = YC_MAX_EXPERIENCE if market == "yc" else 2
+
     kept, stats = build(args.date, market, args.max_age_days, args.max_years,
                         include_done=args.include_done,
                         keep_per_role=args.dedupe,
-                        strict_age=args.strict_age)
+                        strict_age=args.strict_age,
+                        refresh_days=args.refresh_days)
 
     dupe_note = (f"{stats['duplicate']} duplicate city/territory postings, "
                  if args.dedupe else "")
@@ -301,9 +377,13 @@ def main():
     # Called out rather than folded silently into the total: these rows are
     # older than the cutoff and only survive because their date can't be read
     # as staleness. Worth an eyeball before applying.
+    if stats["refreshed"]:
+        print(f"  {stats['refreshed']} kept despite being published "
+              f">{args.max_age_days}d ago, last modified within "
+              f"{args.refresh_days}d (evergreen reqs still being maintained)")
     if stats["age_exempt"]:
         print(f"  {stats['age_exempt']} kept despite a >{args.max_age_days}d "
-              f"publication date (Ashby exposes no last-updated field; "
+              f"date (legacy rows with no publication date recorded; "
               f"--strict-age drops them)")
     print()
 

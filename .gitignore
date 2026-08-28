@@ -5,6 +5,12 @@ __pycache__/
 # Scratch files left behind by the CSV migration / round-trip checks.
 *.mig
 *.csv.t
+*.log
+
+# Pre-migration copies of the CSVs, kept locally as a safety net. Not tracked:
+# git already holds those exact versions in its history, so committing them
+# would be the same data twice with no way to tell which is authoritative.
+data/backup_pre_posted_at/
 
 # NOTE: data/*.csv, profile.py and assets/ ARE tracked on purpose -- this repo
 # is private and holds the actual job-search state, not just the tooling. If it
