@@ -42,6 +42,7 @@ reported so the omission is visible rather than silent.
 """
 
 import argparse
+import http.client
 import html
 import json
 import re
@@ -114,10 +115,47 @@ def extract_years_experience(text: str, return_match_text: bool = False):
     return (years, match.group(0)) if return_match_text else years
 
 
+# Transient network failures, as opposed to a server answering "no". A run makes
+# several hundred sequential requests and a shared public API dropping some of
+# them is routine at that volume -- boards-api.greenhouse.io starts timing out
+# and hanging up after a few dozen calls in a row.
+#
+# http.client.HTTPException belongs here because urllib only wraps errors raised
+# while *sending* a request in URLError: anything raised while reading the
+# response comes back unwrapped, RemoteDisconnected included. Leave it out and a
+# single server hanging up mid-response aborts the entire run.
+TRANSIENT_ERRORS = (urllib.error.URLError, http.client.HTTPException,
+                    ConnectionError, TimeoutError)
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def with_retry(fn, attempts: int = 3, backoff: float = 1.5):
+    """Run fn(), retrying transient failures with a growing pause between tries.
+
+    An HTTPError is the server answering, so a 404 or a 403 fails immediately
+    rather than being asked three times -- only the statuses that mean "busy,
+    come back" are worth repeating.
+    """
+    for attempt in range(attempts):
+        last = attempt == attempts - 1
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            if last or e.code not in RETRYABLE_STATUS:
+                raise
+        except TRANSIENT_ERRORS:
+            if last:
+                raise
+        time.sleep(backoff * (attempt + 1))
+
+
 def http_get_json(url: str, timeout: int = 20):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+
+    def once():
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    return with_retry(once)
 
 
 def http_post_json(url: str, payload: dict, timeout: int = 20):
@@ -129,8 +167,11 @@ def http_post_json(url: str, payload: dict, timeout: int = 20):
                  "Accept": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+
+    def once():
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    return with_retry(once)
 
 
 def http_get_text(url: str, timeout: int = 25, accept: str = None) -> str:
@@ -140,8 +181,11 @@ def http_get_text(url: str, timeout: int = 25, accept: str = None) -> str:
     if accept:
         headers["Accept"] = accept
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace")
+
+    def once():
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", "replace")
+    return with_retry(once)
 
 
 def parse_date(value):
@@ -592,8 +636,7 @@ def fetch_workday(company: dict):
                 [info.get("location")] + list(info.get("additionalLocations") or [])))
             if any(spelled_out):
                 location = "; ".join(x for x in spelled_out if x)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
-                ValueError):
+        except TRANSIENT_ERRORS + (ValueError,):
             # Leaving posted_at blank makes the age filter drop this posting and
             # count it as undated, which is reported -- better than guessing a
             # date from the ceilinged "30+ Days Ago" string.
@@ -904,8 +947,10 @@ def fetch_all_matches(qualified_only: bool = True, market: str = "us",
             # an age in prose rather than a date and needs a point to count back
             # from. Injected here so no fetcher signature has to change.
             jobs = fetcher({**c, "reference_date": today})
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError,
-                ValueError, KeyError, IndexError) as e:
+        except TRANSIENT_ERRORS + (ValueError, KeyError, IndexError) as e:
+            # One unreachable company must never cost the other hundred-odd: a
+            # run takes minutes and writes nothing until it returns, so an
+            # escaping exception here throws away all of it.
             print(f"  [warn] {c['name']}: fetch failed ({e})", file=sys.stderr)
             continue
         for j in jobs:
