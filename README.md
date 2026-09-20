@@ -5,12 +5,104 @@ sponsor visas, drafting tailored application materials, and prefilling
 application forms. **Every application is submitted by you, manually** —
 nothing here auto-clicks Submit or bypasses CAPTCHA/anti-bot checks.
 
-## Setup (already done in this environment)
+## Setup
+
+### What you need
+
+- **Python 3.9 or newer.** The whole pipeline is standard library only — `csv`,
+  `json`, `urllib`, `re`, `argparse`. Nothing to install for steps 1–4 and 6.
+- **Playwright + Chromium**, and *only* for step 5 (`prefill.py`, the browser
+  form-filler). If you never run that step, you never need it.
+- **No API keys, no accounts, no ATS logins.** Every source is the public feed a
+  company's own careers page already calls.
+
+### Install
 
 ```
-pip install playwright
-python -m playwright install chromium
+git clone https://github.com/KarimMaoui/Sales-Job-Bot.git
+cd Sales-Job-Bot
 ```
+
+Then, for the `prefill.py` step only:
+
+```
+# Windows -- py is the launcher, always on PATH once Python is installed
+py -m pip install playwright
+py -m playwright install chromium
+
+# macOS / Linux
+python3 -m pip install playwright
+python3 -m playwright install chromium
+```
+
+Those are two different things and both are required: the first installs the
+Python package, the second downloads the actual Chromium binary (~150 MB) into a
+per-user cache (`%LOCALAPPDATA%\ms-playwright` on Windows,
+`~/.cache/ms-playwright` on Linux, `~/Library/Caches/ms-playwright` on macOS).
+Installing the package alone gets you an import that works and a launch that
+fails — see [Troubleshooting](#troubleshooting).
+
+Optional but recommended, to keep Playwright out of your global site-packages:
+
+```
+py -m venv .venv                 # python3 -m venv .venv on macOS / Linux
+source .venv/Scripts/activate    # Git Bash;  .venv\Scripts\activate on cmd/PowerShell
+                                 # source .venv/bin/activate on macOS / Linux
+py -m pip install playwright
+py -m playwright install chromium
+```
+
+The browser cache lives outside the venv, so `playwright install` is needed once
+per machine, not once per venv.
+
+### Check it worked
+
+```
+py fetch_jobs.py --help        # imports nothing third-party; should print the flags
+py prefill.py --help           # ImportError here means Playwright isn't installed
+py -m playwright --version     # confirms the package
+py fetch_jobs.py --check-slugs # hits every career-site feed, prints a count per company
+```
+
+`--check-slugs` is the real end-to-end check: it is the one command that needs no
+`--date`, and a company returning `0` means its feed moved (see
+[`companies.py`](#editing-your-info)), not that you installed something wrong.
+
+The Workflow section below spells commands as `python script.py`. On Windows read
+that as `py script.py` throughout.
+
+### Make it yours
+
+This repo carries a real job search, not just the tooling, so a fresh clone is
+somebody else's state. Before your first run:
+
+1. **`profile.py`** — name, email, phone, links, and the screening answers
+   (`requires_visa_sponsorship`, `authorized_to_work_us`). `prefill.py` types in
+   exactly what is here.
+2. **`assets/`** — drop in your own resume PDF and point `profile.py`'s
+   `resume_path` at it. A missing file only warns, so the upload silently does
+   not happen.
+3. **`resume_data.py`** — the bullets `tailor.py` draws from. Keep them in sync
+   with the PDF.
+4. **`data/*.csv`** — delete the `jobs*.csv` and `shortlist*.csv` files to start
+   from an empty history; the next `tracker.py` run recreates the file, header
+   included. Keep them and you inherit somebody else's `status` marks.
+
+⚠️ Those same four items are why this repo should not be public with real data in
+it: `profile.py` and `assets/` hold a phone number, a personal email and visa
+answers, and `data/*.csv` is a record of who was applied to. Making the repo
+public means removing them from the **git history**, not just the working tree.
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `python: command not found` / `'python' is not recognized` (Windows) | `python` is often absent from PATH even with Python installed, and `python3` may hit the Microsoft Store stub. Use `py`, or the full path: `"C:\Program Files\Python313\python.exe"`. |
+| `Executable doesn't exist at ...\ms-playwright\chromium-xxxx\...` | The package is installed but the browser is not. Run `py -m playwright install chromium`. |
+| `ModuleNotFoundError: No module named 'playwright'` | Only `prefill.py` needs it. Install it, or activate the venv you installed it into. |
+| `error: the following arguments are required: --date` | Every fetching command takes `--date YYYY-MM-DD`; the scripts cannot read the clock. `--check-slugs` is the exception. |
+| A run returns far fewer rows than expected | Freshness filter, by design: 30 days by default. Widen with `--max-age-days` / `--refresh-days`. |
+| One company returns nothing | Its ATS or slug changed. `py fetch_jobs.py --check-slugs` prints per-company counts; fix the entry in `companies.py`. |
 
 ## Workflow
 
