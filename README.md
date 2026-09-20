@@ -18,38 +18,31 @@ nothing here auto-clicks Submit or bypasses CAPTCHA/anti-bot checks.
 
 ### Install
 
-```
+```bash
 git clone https://github.com/KarimMaoui/Sales-Job-Bot.git
 cd Sales-Job-Bot
 ```
 
 Then, for the `prefill.py` step only:
 
-```
-# Windows -- py is the launcher, always on PATH once Python is installed
-py -m pip install playwright
-py -m playwright install chromium
-
-# macOS / Linux
+```bash
 python3 -m pip install playwright
 python3 -m playwright install chromium
 ```
 
 Those are two different things and both are required: the first installs the
 Python package, the second downloads the actual Chromium binary (~150 MB) into a
-per-user cache (`%LOCALAPPDATA%\ms-playwright` on Windows,
-`~/.cache/ms-playwright` on Linux, `~/Library/Caches/ms-playwright` on macOS).
-Installing the package alone gets you an import that works and a launch that
-fails — see [Troubleshooting](#troubleshooting).
+per-user cache (`~/Library/Caches/ms-playwright`, or `~/.cache/ms-playwright` on
+Linux). Installing the package alone gets you an import that works and a launch
+that fails — see [Troubleshooting](#troubleshooting).
 
 Optional but recommended, to keep Playwright out of your global site-packages:
 
-```
-py -m venv .venv                 # python3 -m venv .venv on macOS / Linux
-source .venv/Scripts/activate    # Git Bash;  .venv\Scripts\activate on cmd/PowerShell
-                                 # source .venv/bin/activate on macOS / Linux
-py -m pip install playwright
-py -m playwright install chromium
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install playwright
+python3 -m playwright install chromium
 ```
 
 The browser cache lives outside the venv, so `playwright install` is needed once
@@ -57,20 +50,16 @@ per machine, not once per venv.
 
 ### Check it worked
 
-```
-py fetch_jobs.py --help        # imports nothing third-party; should print the flags
-py prefill.py --help           # ImportError here means Playwright isn't installed
-py -m playwright --version     # confirms the package
-py fetch_jobs.py --check-slugs # hits every career-site feed, prints a count per company
+```bash
+python3 fetch_jobs.py --help        # imports nothing third-party; prints the flags
+python3 prefill.py --help           # ImportError here means Playwright isn't installed
+python3 -m playwright --version     # confirms the package
+python3 fetch_jobs.py --check-slugs # hits every feed, prints a count per company
 ```
 
 `--check-slugs` is the real end-to-end check: it is the one command that needs no
 `--date`, and a company returning `0` means its feed moved (see
 [`companies.py`](#editing-your-info)), not that you installed something wrong.
-
-The Workflow section below spells commands as `python script.py`. Read that as
-`py script.py` on Windows and `python3 script.py` on macOS — neither ships a bare
-`python` on PATH.
 
 ### Make it yours
 
@@ -98,14 +87,13 @@ public means removing them from the **git history**, not just the working tree.
 
 | Symptom | Cause and fix |
 |---|---|
-| `python: command not found` / `'python' is not recognized` (Windows) | `python` is often absent from PATH even with Python installed, and `python3` may hit the Microsoft Store stub. Use `py`, or the full path: `"C:\Program Files\Python313\python.exe"`. |
-| `python: command not found` (macOS) | Expected — macOS ships no `python`, only `python3`. Use `python3`. |
+| `python: command not found` | There is no bare `python` on a current macOS; every command here is `python3`. |
 | **Every** company warns `fetch failed (... CERTIFICATE_VERIFY_FAILED ...)` | See [SSL certificate failures](#ssl-certificate-failures) below. Nothing is written when this happens, so the CSVs are untouched. |
-| `Executable doesn't exist at ...\ms-playwright\chromium-xxxx\...` | The package is installed but the browser is not. Run `py -m playwright install chromium`. |
+| `Executable doesn't exist at .../ms-playwright/chromium-xxxx/...` | The package is installed but the browser is not. Run `python3 -m playwright install chromium`. |
 | `ModuleNotFoundError: No module named 'playwright'` | Only `prefill.py` needs it. Install it, or activate the venv you installed it into. |
 | `error: the following arguments are required: --date` | Every fetching command takes `--date YYYY-MM-DD`; the scripts cannot read the clock. `--check-slugs` is the exception. |
 | A run returns far fewer rows than expected | Freshness filter, by design: 30 days by default. Widen with `--max-age-days` / `--refresh-days`. |
-| One company returns nothing | Its ATS or slug changed. `py fetch_jobs.py --check-slugs` prints per-company counts; fix the entry in `companies.py`. |
+| One company returns nothing | Its ATS or slug changed. `python3 fetch_jobs.py --check-slugs` prints per-company counts; fix the entry in `companies.py`. |
 
 ### SSL certificate failures
 
@@ -114,55 +102,60 @@ problem, not the career sites. The fetchers use plain `urllib.request` with no
 custom SSL context, so they read OpenSSL's default verify paths — which means
 `SSL_CERT_FILE` is enough to fix this, and no code change is needed.
 
-Identify which of the two causes it is:
+The usual cause is a Python installed from python.org: it does not read the macOS
+Keychain, and it ships without a CA bundle of its own. Confirm with:
 
 ```bash
 python3 -c "import ssl; print(ssl.get_default_verify_paths())"
-openssl s_client -connect boards-api.greenhouse.io:443 \
-  -servername boards-api.greenhouse.io </dev/null 2>/dev/null | grep -m2 "i:"
 ```
 
-**No CA bundle** — the path printed above does not exist, and the issuer is a
-normal public CA. A python.org build does not use the macOS Keychain and ships
-without a bundle. Error text: `unable to get local issuer certificate`.
+`cafile=None` while `openssl_cafile` points at
+`/Library/Frameworks/Python.framework/Versions/X.Y/etc/openssl/cert.pem` means
+that file is simply not there — nothing to verify against, so every host fails.
+Install the bundle the python.org installer ships:
 
 ```bash
-open "/Applications/Python 3.13/Install Certificates.command"   # match your version
-# or, however Python was installed:
+open "/Applications/Python 3.10/Install Certificates.command"   # match your version
+```
+
+Or point Python at `certifi` instead, which works whatever the install method:
+
+```bash
 python3 -m pip install --upgrade certifi
-export SSL_CERT_FILE="$(python3 -m certifi)"
+export SSL_CERT_FILE="$(python3 -c 'import certifi; print(certifi.where())')"
 ```
 
-**TLS interception** — the issuer is a corporate root (Zscaler, Netskope, a
-company CA). Error text: `self signed certificate in certificate chain`. Add that
-root to the bundle rather than turning verification off:
-
-```bash
-security find-certificate -a -p /Library/Keychains/System.keychain > /tmp/corp-roots.pem
-security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >> /tmp/corp-roots.pem
-cat "$(python3 -m certifi)" /tmp/corp-roots.pem > ~/.ca-bundle.pem
-export SSL_CERT_FILE="$HOME/.ca-bundle.pem"
-```
-
-Confirm, then put the `export` in your shell profile so it survives a new terminal:
+Verify, then add that `export` to `~/.bash_profile` so a new terminal keeps it:
 
 ```bash
 python3 -c "import urllib.request as u; print(u.urlopen('https://boards-api.greenhouse.io/v1/boards/datadog/jobs', timeout=15).status)"
 ```
 
-Note that Amazon's `mwinit` is unrelated: it authenticates to Midway-protected
-internal sites, and every source here is a public endpoint.
+A `200` there and the fetchers work.
+
+One variant worth recognising: if the errors read `self signed certificate in
+certificate chain` rather than `unable to get local issuer certificate`, and
+`openssl s_client -connect boards-api.greenhouse.io:443 -servername
+boards-api.greenhouse.io </dev/null | grep "i:"` shows an issuer that is not a
+public CA, the network is intercepting TLS. Append that root to the bundle rather
+than disabling verification:
+
+```bash
+security find-certificate -a -p /Library/Keychains/System.keychain > /tmp/extra-roots.pem
+cat "$(python3 -c 'import certifi; print(certifi.where())')" /tmp/extra-roots.pem > ~/.ca-bundle.pem
+export SSL_CERT_FILE="$HOME/.ca-bundle.pem"
+```
 
 ## Workflow
 
 1. **Find matching jobs**
    ```
-   python fetch_jobs.py --date 2026-08-28              # entry-level sales roles in the US
-   python fetch_jobs.py --date 2026-08-28 --eu         # roles in France, or remote in a scope including France
-   python fetch_jobs.py --date 2026-08-28 --french     # French-speaking sales roles anywhere in the world
-   python fetch_jobs.py --date 2026-08-28 --yc         # YC startups: sales/marketing/ops, 3 weeks, 0-3y (see below)
-   python fetch_jobs.py --date 2026-08-28 --all-levels # skip the seniority/language qualification filter
-   python fetch_jobs.py --date 2026-08-28 --max-age-days 60 --refresh-days 30
+   python3 fetch_jobs.py --date 2026-08-28              # entry-level sales roles in the US
+   python3 fetch_jobs.py --date 2026-08-28 --eu         # roles in France, or remote in a scope including France
+   python3 fetch_jobs.py --date 2026-08-28 --french     # French-speaking sales roles anywhere in the world
+   python3 fetch_jobs.py --date 2026-08-28 --yc         # YC startups: sales/marketing/ops, 3 weeks, 0-3y (see below)
+   python3 fetch_jobs.py --date 2026-08-28 --all-levels # skip the seniority/language qualification filter
+   python3 fetch_jobs.py --date 2026-08-28 --max-age-days 60 --refresh-days 30
    ```
    Queries each company in `companies.py` via its public career-site API and
    filters titles to sales roles. `--date` is required because the scripts are
@@ -251,9 +244,9 @@ internal sites, and every source here is a public endpoint.
    ### The YC list (`--yc`)
 
    ```
-   python fetch_jobs.py --date 2026-08-28 --yc
-   python tracker.py    --date 2026-08-28 --yc --new-only   # -> data/jobs_yc.csv
-   python shortlist.py  --date 2026-08-28 --yc              # -> data/shortlist_yc.csv
+   python3 fetch_jobs.py --date 2026-08-28 --yc
+   python3 tracker.py    --date 2026-08-28 --yc --new-only   # -> data/jobs_yc.csv
+   python3 shortlist.py  --date 2026-08-28 --yc              # -> data/shortlist_yc.csv
    ```
 
    Runs on the board's own bands rather than the sales defaults: **three weeks**
@@ -298,10 +291,10 @@ internal sites, and every source here is a public endpoint.
 
 2. **Track them over time** (avoids re-seeing the same posting)
    ```
-   python tracker.py --date 2026-08-09 --new-only            # -> data/jobs.csv
-   python tracker.py --date 2026-08-09 --new-only --eu       # -> data/jobs_eu.csv
-   python tracker.py --date 2026-08-09 --new-only --french   # -> data/jobs_french.csv
-   python tracker.py --date 2026-08-09 --new-only --yc       # -> data/jobs_yc.csv
+   python3 tracker.py --date 2026-08-09 --new-only            # -> data/jobs.csv
+   python3 tracker.py --date 2026-08-09 --new-only --eu       # -> data/jobs_eu.csv
+   python3 tracker.py --date 2026-08-09 --new-only --french   # -> data/jobs_french.csv
+   python3 tracker.py --date 2026-08-09 --new-only --yc       # -> data/jobs_yc.csv
    ```
    Appends new postings to a CSV. Run this daily/weekly and pass today's
    actual date (the script can't read the clock itself) — it's written blind,
@@ -324,9 +317,9 @@ internal sites, and every source here is a public endpoint.
 
 3. **Cut the tracked list down to a ranked shortlist**
    ```
-   python shortlist.py --date 2026-08-09            # -> data/shortlist.csv
-   python shortlist.py --date 2026-08-09 --french   # -> data/shortlist_french.csv
-   python shortlist.py --date 2026-08-09 --yc       # -> data/shortlist_yc.csv
+   python3 shortlist.py --date 2026-08-09            # -> data/shortlist.csv
+   python3 shortlist.py --date 2026-08-09 --french   # -> data/shortlist_french.csv
+   python3 shortlist.py --date 2026-08-09 --yc       # -> data/shortlist_yc.csv
    ```
    Drops postings published more than `--max-age-days` ago (default 30, same as
    `fetch_jobs.py`) unless modified within `--refresh-days` (default 15), and
@@ -379,7 +372,7 @@ internal sites, and every source here is a public endpoint.
 
 4. **Draft a tailored cover letter + resume bullet order for one job**
    ```
-   python tailor.py --company Datadog --title "Commercial Account Executive" \
+   python3 tailor.py --company Datadog --title "Commercial Account Executive" \
        --location "Denver, Colorado, USA" --url "https://..."
    ```
    Writes drafts to `data/drafts/`. **Read and personalize the bracketed
@@ -387,7 +380,7 @@ internal sites, and every source here is a public endpoint.
 
 5. **Prefill the application form**
    ```
-   python prefill.py --url "https://..."
+   python3 prefill.py --url "https://..."
    ```
    Opens a real browser window, fills name/email/phone/links/resume from
    `profile.py`, and leaves the browser open. You review every field, answer
@@ -396,16 +389,16 @@ internal sites, and every source here is a public endpoint.
 
 6. **Record what you did**
    ```
-   python mark.py 8094078 --status applied --date 2026-08-09
-   python mark.py 8094078 --status rejected --date 2026-08-20 --note "no sponsorship"
-   python mark.py --list                       # everything you've touched
+   python3 mark.py 8094078 --status applied --date 2026-08-09
+   python3 mark.py 8094078 --status rejected --date 2026-08-20 --note "no sponsorship"
+   python3 mark.py --list                       # everything you've touched
    ```
    The positional argument is any substring of the posting URL — the job id
    from the shortlist is the easy one to paste. An ambiguous match refuses to
    write anything and prints the candidates; `--all` marks them all on
    purpose, which is how you skip a batch of duplicate city postings:
    ```
-   python mark.py samsara.com --status skipped --date 2026-08-09 --all
+   python3 mark.py samsara.com --status skipped --date 2026-08-09 --all
    ```
 
    Statuses are `new`, `interested`, `drafted` (still on your to-do list) and
@@ -465,7 +458,7 @@ internal sites, and every source here is a public endpoint.
   actual posting or with the recruiter. Re-run with `--check-slugs` if a
   company stops returning results (they may have switched ATS providers):
   ```
-  python fetch_jobs.py --check-slugs
+  python3 fetch_jobs.py --check-slugs
   ```
 
 ## What this deliberately does NOT do
