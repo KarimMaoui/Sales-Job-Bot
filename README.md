@@ -68,8 +68,9 @@ py fetch_jobs.py --check-slugs # hits every career-site feed, prints a count per
 `--date`, and a company returning `0` means its feed moved (see
 [`companies.py`](#editing-your-info)), not that you installed something wrong.
 
-The Workflow section below spells commands as `python script.py`. On Windows read
-that as `py script.py` throughout.
+The Workflow section below spells commands as `python script.py`. Read that as
+`py script.py` on Windows and `python3 script.py` on macOS — neither ships a bare
+`python` on PATH.
 
 ### Make it yours
 
@@ -98,11 +99,59 @@ public means removing them from the **git history**, not just the working tree.
 | Symptom | Cause and fix |
 |---|---|
 | `python: command not found` / `'python' is not recognized` (Windows) | `python` is often absent from PATH even with Python installed, and `python3` may hit the Microsoft Store stub. Use `py`, or the full path: `"C:\Program Files\Python313\python.exe"`. |
+| `python: command not found` (macOS) | Expected — macOS ships no `python`, only `python3`. Use `python3`. |
+| **Every** company warns `fetch failed (... CERTIFICATE_VERIFY_FAILED ...)` | See [SSL certificate failures](#ssl-certificate-failures) below. Nothing is written when this happens, so the CSVs are untouched. |
 | `Executable doesn't exist at ...\ms-playwright\chromium-xxxx\...` | The package is installed but the browser is not. Run `py -m playwright install chromium`. |
 | `ModuleNotFoundError: No module named 'playwright'` | Only `prefill.py` needs it. Install it, or activate the venv you installed it into. |
 | `error: the following arguments are required: --date` | Every fetching command takes `--date YYYY-MM-DD`; the scripts cannot read the clock. `--check-slugs` is the exception. |
 | A run returns far fewer rows than expected | Freshness filter, by design: 30 days by default. Widen with `--max-age-days` / `--refresh-days`. |
 | One company returns nothing | Its ATS or slug changed. `py fetch_jobs.py --check-slugs` prints per-company counts; fix the entry in `companies.py`. |
+
+### SSL certificate failures
+
+Every source warning `CERTIFICATE_VERIFY_FAILED` at once is a local trust-store
+problem, not the career sites. The fetchers use plain `urllib.request` with no
+custom SSL context, so they read OpenSSL's default verify paths — which means
+`SSL_CERT_FILE` is enough to fix this, and no code change is needed.
+
+Identify which of the two causes it is:
+
+```bash
+python3 -c "import ssl; print(ssl.get_default_verify_paths())"
+openssl s_client -connect boards-api.greenhouse.io:443 \
+  -servername boards-api.greenhouse.io </dev/null 2>/dev/null | grep -m2 "i:"
+```
+
+**No CA bundle** — the path printed above does not exist, and the issuer is a
+normal public CA. A python.org build does not use the macOS Keychain and ships
+without a bundle. Error text: `unable to get local issuer certificate`.
+
+```bash
+open "/Applications/Python 3.13/Install Certificates.command"   # match your version
+# or, however Python was installed:
+python3 -m pip install --upgrade certifi
+export SSL_CERT_FILE="$(python3 -m certifi)"
+```
+
+**TLS interception** — the issuer is a corporate root (Zscaler, Netskope, a
+company CA). Error text: `self signed certificate in certificate chain`. Add that
+root to the bundle rather than turning verification off:
+
+```bash
+security find-certificate -a -p /Library/Keychains/System.keychain > /tmp/corp-roots.pem
+security find-certificate -a -p /System/Library/Keychains/SystemRootCertificates.keychain >> /tmp/corp-roots.pem
+cat "$(python3 -m certifi)" /tmp/corp-roots.pem > ~/.ca-bundle.pem
+export SSL_CERT_FILE="$HOME/.ca-bundle.pem"
+```
+
+Confirm, then put the `export` in your shell profile so it survives a new terminal:
+
+```bash
+python3 -c "import urllib.request as u; print(u.urlopen('https://boards-api.greenhouse.io/v1/boards/datadog/jobs', timeout=15).status)"
+```
+
+Note that Amazon's `mwinit` is unrelated: it authenticates to Midway-protected
+internal sites, and every source here is a public endpoint.
 
 ## Workflow
 
